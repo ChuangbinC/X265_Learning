@@ -46,15 +46,18 @@ enum { INVALID_SLICE_PRIORITY = 10 }; // a value larger than any X265_TYPE_* mac
 
 // Frame level job providers. FrameEncoder and Lookahead derive from
 // this class and implement findJob()
+// 只有两个类继承自JobProvider，Lookahead和WaveFront，说明Lookahead和WaveFront需要工作线程来完成其任务
+// 工作线程的任务提供者JobProvider
 class JobProvider
 {
 public:
 
-    ThreadPool*   m_pool;
+    ThreadPool*   m_pool;   // 一个JobProvider是对应到一个线程池的
     sleepbitmap_t m_ownerBitmap;
     int           m_jpId;
-    int           m_sliceType;
-    bool          m_helpWanted;
+    int           m_sliceType; // 此标志为工作的优先级
+    bool          m_helpWanted; // 此标志表示需要有工作线程来完成任务，进而调用findJob来处理任务，
+                                // 实际任务由派生类来实现，但findJob的实现需要在完成一个任务后判断是否还有其它任务要做，从而设置此标志
     bool          m_isFrameEncoder; /* rather ugly hack, but nothing better presents itself */
 
     JobProvider()
@@ -69,10 +72,12 @@ public:
     virtual ~JobProvider() {}
 
     // Worker threads will call this method to perform work
-    virtual void findJob(int workerThreadId) = 0;
+    virtual void findJob(int workerThreadId) = 0; // 派生类需要实现此函数
 
     // Will awaken one idle thread, preferring a thread which most recently
     // performed work for this provider.
+    // 此函数会在线程池中查找一个处于睡眠状态的线程，优先找它拥有的线程，不行再找全部线程，
+    // 设置其JobProvider为this，再唤醒它。
     void tryWakeOne();
 };
 

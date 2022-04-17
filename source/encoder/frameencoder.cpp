@@ -274,17 +274,20 @@ bool FrameEncoder::startCompressFrame(Frame* curFrame)
             return false;
     }
 
-    m_enable.trigger();
+    m_enable.trigger(); //触发线程，下一步将会进入threadMain()函数中
     return true;
 }
 
+/**
+* threadMain()函数相当于线程函数的main()函数，其主要功能就是在完成线程触发后等待处理，在此处，调用了compressFrame()函数
+**/
 void FrameEncoder::threadMain()
 {
     THREAD_NAME("Frame", m_jpId);
 
-    if (m_pool)
+    if (m_pool) //若线程池不为空
     {
-        m_pool->setCurrentThreadAffinity();
+        m_pool->setCurrentThreadAffinity(); //设置当前线程
 
         /* the first FE on each NUMA node is responsible for allocating thread
          * local data for all worker threads in that pool. If WPP is disabled, then
@@ -317,7 +320,7 @@ void FrameEncoder::threadMain()
         else
             m_localTldIdx = m_pool->m_numWorkers + m_jpId;
     }
-    else
+    else //若线程池为空，则WPP
     {
         m_tld = new ThreadLocalData;
         m_tld->analysis.initSearch(*m_param, m_top->m_scalingList);
@@ -325,8 +328,8 @@ void FrameEncoder::threadMain()
         m_localTldIdx = 0;
     }
 
-    m_done.trigger();     /* signal that thread is initialized */
-    m_enable.wait();      /* Encoder::encode() triggers this event */
+    m_done.trigger();     /* signal that thread is initialized */ //线程已经触发
+    m_enable.wait();      /* Encoder::encode() triggers this event */ //等待处理
 
     while (m_threadActive)
     {
@@ -340,7 +343,7 @@ void FrameEncoder::threadMain()
             while (((m_frame->m_analysisData.interData == NULL && m_frame->m_analysisData.intraData == NULL) || (uint32_t)m_frame->m_poc != m_frame->m_analysisData.poc))
                 m_frame->m_copyMVType.wait();
         }
-        compressFrame();
+        compressFrame(); // 调用compressFrame()
         m_done.trigger(); /* FrameEncoder::getEncodedPicture() blocks for this event */
         m_enable.wait();
     }
@@ -367,20 +370,20 @@ uint32_t getBsLength( int32_t code )
 
 void FrameEncoder::compressFrame()
 {
-    ProfileScopeEvent(frameThread);
+    ProfileScopeEvent(frameThread); //帧线程的档次范围
 
-    m_startCompressTime = x265_mdate();
-    m_totalActiveWorkerCount = 0;
-    m_activeWorkerCountSamples = 0;
-    m_totalWorkerElapsedTime = 0;
-    m_totalNoWorkerTime = 0;
-    m_countRowBlocks = 0;
-    m_allRowsAvailableTime = 0;
-    m_stallStartTime = 0;
+    m_startCompressTime = x265_mdate(); //编码的开始时间戳(timestamp时间戳 when frame encoder is given a frame)
+    m_totalActiveWorkerCount = 0;  //统计m_activeWorkerCount的和，即经过CTU压缩后统计，进入帧前初始化为0（sum of m_activeWorkerCount sampled at end of each CTU）
+    m_activeWorkerCountSamples = 0; //当前帧已经编码分析完毕的CTU个数（count of times m_activeWorkerCount was sampled (think vbv restarts)）
+    m_totalWorkerElapsedTime = 0;	//初始化所有CTU编码滤波占用的时间（total elapsed time spent by worker threads processing CTUs）
+    m_totalNoWorkerTime = 0;	//初始化当前帧编码占用的时间（total elapsed time without any active worker threads）
+    m_countRowBlocks = 0;	//正在运行的CTU行因为上一行没有完成完毕而强制退出的个数，在帧编码前初始化为0（count of workers forced to abandon a row because of top dependency）
+    m_allRowsAvailableTime = 0;	//初始化当前帧所有CTU行准备好的时间点（timestamp when all reference dependencies are resolved）
+    m_stallStartTime = 0;	//初始化正在进行编码的rows个数为0时的时间点（timestamp when worker count becomes 0）
 
     m_completionCount = 0;
-    m_bAllRowsStop = false;
-    m_vbvResetTriggerRow = -1;
+    m_bAllRowsStop = false;	//是否将所有CTU的编码停止,在每帧进入前初始化为false,在CTU编码决策中需要重新编码时将置为true
+    m_vbvResetTriggerRow = -1;	//需要重新编码的CTU行号,每帧开始编码前初始化为-1
     m_rowSliceTotalBits[0] = 0;
     m_rowSliceTotalBits[1] = 0;
 
@@ -389,6 +392,7 @@ void FrameEncoder::compressFrame()
     m_ssimCnt = 0;
     memset(&(m_frame->m_encData->m_frameStats), 0, sizeof(m_frame->m_encData->m_frameStats));
 
+    //2、存取单元access unit
     /* Emit access unit delimiter unless this is the first frame and the user is
      * not repeating headers (since AUD is supposed to be the first NAL in the access
      * unit) */
@@ -425,6 +429,7 @@ void FrameEncoder::compressFrame()
     if (m_top->m_param->rc.bStatRead && m_top->m_param->bMultiPassOptRPS)
         m_frame->m_encData->m_slice->m_rpsIdx = (m_top->m_rateControl->m_rce2Pass + m_frame->m_encodeOrder)->rpsIdx;
 
+    // 3、加权预测
     // Weighted Prediction parameters estimation.
     bool bUseWeightP = slice->m_sliceType == P_SLICE && slice->m_pps->bUseWeightPred;
     bool bUseWeightB = slice->m_sliceType == B_SLICE && slice->m_pps->bUseWeightedBiPred;
@@ -433,6 +438,7 @@ void FrameEncoder::compressFrame()
     if (m_param->analysisLoad && (bUseWeightP || bUseWeightB))
         reuseWP = (WeightParam*)m_frame->m_analysisData.wt;
 
+    //加权预测的参数估计
     if (bUseWeightP || bUseWeightB)
     {
 #if DETAILED_CU_STATS
@@ -454,10 +460,13 @@ void FrameEncoder::compressFrame()
         else
         {
             WeightAnalysis wa(*this);
+            //从当前job中拥有核并且sleep状态的核可以触发多线程，如果没有可用核则在当前线程中完成进入else
             if (m_pool && wa.tryBondPeers(*this, 1))
                 /* use an idle worker for weight analysis */
-                wa.waitForExit();
+                /* 用闲置线程去完成weightAnalyse */
+                wa.waitForExit(); //一直等待到任务全部完成，这里等待的是核释放，内核释放了任务也就完成了
             else
+                //加权预测分析(每个list的第一帧分析加权与否，其它不加权)
                 weightAnalyse(*slice, *m_frame, *m_param);
 
         }
@@ -468,16 +477,23 @@ void FrameEncoder::compressFrame()
 
     if (m_param->analysisSave && (bUseWeightP || bUseWeightB))
         reuseWP = (WeightParam*)m_frame->m_analysisData.wt;
+
+    // 4、运动参考，配置参考帧信息
     // Generate motion references
+    //预测方向的数量，若为P帧则数量为1，若为B帧则数量为2，否则为0，即获取当前有几个list
     int numPredDir = slice->isInterP() ? 1 : slice->isInterB() ? 2 : 0;
+    //根据预测方向的数量遍历list的个数
     for (int l = 0; l < numPredDir; l++)
     {
+        //遍历当前list的所有参考帧
         for (int ref = 0; ref < slice->m_numRefIdx[l]; ref++)
         {
             WeightParam *w = NULL;
+            //如果是P帧或B帧，并且bPresentFlag为1
             if ((bUseWeightP || bUseWeightB) && slice->m_weightPredTable[l][ref][0].bPresentFlag)
-                w = slice->m_weightPredTable[l][ref];
+                w = slice->m_weightPredTable[l][ref]; //获取加权参数
             slice->m_refReconPicList[l][ref] = slice->m_refFrameList[l][ref]->m_reconPic;
+            //获取参考帧信息，申请加权帧内存
             m_mref[l][ref].init(slice->m_refReconPicList[l][ref], w, *m_param);
         }
         if (m_param->analysisSave && (bUseWeightP || bUseWeightB))
@@ -494,8 +510,10 @@ void FrameEncoder::compressFrame()
     else
         numTLD = 1;
 
+    // 5、根据码率控制确定QP的大小
     /* Get the QP for this frame from rate control. This call may block until
      * frames ahead of it in encode order have called rateControlEnd() */
+    /* 从速率控制中获取该帧的QP。这个调用可能会阻塞，直到编码顺序在它前面的帧已经调用rateControlEnd() */
     m_rce.encodeOrder = m_frame->m_encodeOrder;
     bool payloadChange = false;
     bool writeSei = true;
@@ -531,8 +549,10 @@ void FrameEncoder::compressFrame()
             }
         }
     }
+
+    // rateControlStart()函数，即码率控制开始
     int qp = m_top->m_rateControl->rateControlStart(m_frame, &m_rce, m_top);
-    m_rce.newQp = qp;
+    m_rce.newQp = qp; //获取当前估计的量化参数
 
     if (m_nr)
     {
@@ -565,6 +585,7 @@ void FrameEncoder::compressFrame()
     }
 
     /* Clip slice QP to 0-51 spec range before encoding */
+    //编码前，根据Offset确定/修正当前Slice的具体QP，取值必须处在0~51内
     slice->m_sliceQp = x265_clip3(-QP_BD_OFFSET, QP_MAX_SPEC, qp);
     if (m_param->bHDROpt)
     {
@@ -585,11 +606,14 @@ void FrameEncoder::compressFrame()
         }
         m_top->m_iFrameNum++;
     }
-    m_initSliceContext.resetEntropy(*slice);
 
-    m_frameFilter.start(m_frame, m_initSliceContext);
+    // 6、熵编码前的一些准备
+    m_initSliceContext.resetEntropy(*slice); // 重置熵编码相关信息
+
+    m_frameFilter.start(m_frame, m_initSliceContext); // 滤波，在后面的调用中若bEnableSAO使能，则SAO
 
     /* ensure all rows are blocked prior to initializing row CTU counters */
+    //将当前WPPmap全部初始化为不可执行
     WaveFront::clearEnabledRowMask();
 
     /* reset entropy coders and compute slice id */
@@ -602,15 +626,18 @@ void FrameEncoder::compressFrame()
     // reset slice counter for rate control update
     m_sliceCnt = 0;
 
+    //7、并行与否，申请空间
+    //一帧并行的流数（CTU行数）
     uint32_t numSubstreams = m_param->bEnableWavefront ? slice->m_sps->numCuInHeight : m_param->maxSlices;
     X265_CHECK(m_param->bEnableWavefront || (m_param->maxSlices == 1), "Multiple slices without WPP unsupport now!");
+    //根据并行的流数申请相关空间
     if (!m_outStreams)
     {
-        m_outStreams = new Bitstream[numSubstreams];
+        m_outStreams = new Bitstream[numSubstreams]; //申请空间
         if (!m_param->bEnableWavefront)
             m_backupStreams = new Bitstream[numSubstreams];
-        m_substreamSizes = X265_MALLOC(uint32_t, numSubstreams);
-        if (!m_param->bEnableSAO)
+        m_substreamSizes = X265_MALLOC(uint32_t, numSubstreams); //申请空间
+        if (!m_param->bEnableSAO) //若没有使能SAO
             for (uint32_t i = 0; i < numSubstreams; i++)
                 m_rows[i].rowGoOnCoder.setBitstream(&m_outStreams[i]);
     }
@@ -620,6 +647,7 @@ void FrameEncoder::compressFrame()
             m_outStreams[i].resetBits();
     }
 
+    //8、SEI（Supplemental Enhancement Information）相关配置
     int prevBPSEI = m_rce.encodeOrder ? m_top->m_lastBPSEI : 0;
 
     if (m_frame->m_lowres.bKeyframe)
@@ -711,25 +739,31 @@ void FrameEncoder::compressFrame()
         else
             x265_log(m_param, X265_LOG_ERROR, "Unrecognized SEI type\n");
     }
+
+    //9、配合RC的线程控制
     /* CQP and CRF (without capped VBV) doesn't use mid-frame statistics to 
      * tune RateControl parameters for other frames.
      * Hence, for these modes, update m_startEndOrder and unlock RC for previous threads waiting in
      * RateControlEnd here, after the slice contexts are initialized. For the rest - ABR
      * and VBV, unlock only after rateControlUpdateStats of this frame is called */
+
+     //因为m_startEndOrder在rateControlUpdateStats中只对ABR或者VBV模式更新,在此更新为了配合RC的线程控制
     if (m_param->rc.rateControlMode != X265_RC_ABR && !m_top->m_rateControl->m_isVbv)
     {
-        m_top->m_rateControl->m_startEndOrder.incr();
+        m_top->m_rateControl->m_startEndOrder.incr(); //更新计数
 
-        if (m_rce.encodeOrder < m_param->frameNumThreads - 1)
+        if (m_rce.encodeOrder < m_param->frameNumThreads - 1) //刚启动时多更新一次
             m_top->m_rateControl->m_startEndOrder.incr(); // faked rateControlEnd calls for negative frames
     }
+
+    //10、CTU分析（分两种情况：WPP使能、WPP不使能）
 
     /* Analyze CTU rows, most of the hard work is done here.  Frame is
      * compressed in a wave-front pattern if WPP is enabled. Row based loop
      * filters runs behind the CTU compression and reconstruction */
 
     for (uint32_t sliceId = 0; sliceId < m_param->maxSlices; sliceId++)    
-        m_rows[m_sliceBaseRow[sliceId]].active = true;
+        m_rows[m_sliceBaseRow[sliceId]].active = true; //触发第一个CTU行
     
     if (m_param->bEnableWavefront)
     {
@@ -766,11 +800,11 @@ void FrameEncoder::compressFrame()
                     continue;
 
                 // block until all reference frames have reconstructed the rows we need
-                for (int l = 0; l < numPredDir; l++)
+                for (int l = 0; l < numPredDir; l++) //当前list的个数
                 {
-                    for (int ref = 0; ref < slice->m_numRefIdx[l]; ref++)
+                    for (int ref = 0; ref < slice->m_numRefIdx[l]; ref++) //当前list 中ref的个数
                     {
-                        Frame *refpic = slice->m_refFrameList[l][ref];
+                        Frame *refpic = slice->m_refFrameList[l][ref]; //获取参考帧
 
                         // NOTE: we unnecessary wait row that beyond current slice boundary
                         const int rowIdx = X265_MIN(sliceEndRow, (row + m_refLagRows));
@@ -783,23 +817,34 @@ void FrameEncoder::compressFrame()
                     }
                 }
 
+                //当前外部参考块（如参考帧对应的参考块）准备完毕,将当前row对应位置的map置为1,标记可以执行
                 enableRowEncoder(m_row_to_idx[row]); /* clear external dependency for this row */
+
+                //如果是第一行
                 if (!rowInSlice)
                 {
-                    m_row0WaitTime = x265_mdate();
+                    //获取当前帧开始编码的的时间点,用于计算当前帧的编码时间
+                    m_row0WaitTime = x265_mdate(); 
+
+                    //当前内部参考块准备完毕,将当前row对应位置的map置为1,标记可以执行
                     enqueueRowEncoder(m_row_to_idx[row]); /* clear internal dependency, start wavefront */
                 }
-                tryWakeOne();
+                //CTU行准备好并触发wpp， 在findjob中运行
+                tryWakeOne(); 
             } // end of loop rowInSlice
         } // end of loop sliceId
 
+        //当前帧所有CTU行准备好的时间点
         m_allRowsAvailableTime = x265_mdate();
+        //多触发一次
         tryWakeOne(); /* ensure one thread is active or help-wanted flag is set prior to blocking */
-        static const int block_ms = 250;
+        static const int block_ms = 250; //超时时间
+
+        //每250ms触发一次,保证全部CTU行都能够执行（如果m_completionEvent在某一位置触发，则会造成不超时，循环退出）
         while (m_completionEvent.timedWait(block_ms))
             tryWakeOne();
     }
-    else
+    else //如果WPP不使能
     {
         for (uint32_t i = 0; i < m_numRows + m_filterRowDelay; i++)
         {
@@ -832,6 +877,7 @@ void FrameEncoder::compressFrame()
 
             // filter
             if (i >= m_filterRowDelay)
+                // 滤波每一行
                 m_frameFilter.processRow(i - m_filterRowDelay);
         }
     }
@@ -906,6 +952,8 @@ void FrameEncoder::compressFrame()
         }
     } // end of (m_param->maxSlices > 1)
 
+    //11、Multi-pass encoding (多路编码)
+    // Multi-pass encoding(Enable writing the stats in a multi-pass encode to the stat output file)
     if (m_param->rc.bStatWrite)
     {
         int totalI = 0, totalP = 0, totalSkip = 0;
@@ -920,7 +968,7 @@ void FrameEncoder::compressFrame()
             totalP                                     += m_rows[i].rowStats.inter8x8Cnt;
             totalSkip                                  += m_rows[i].rowStats.skip8x8Cnt;
         }
-        int totalCuCount = totalI + totalP + totalSkip;
+        int totalCuCount = totalI + totalP + totalSkip; //总CU数目
         m_frame->m_encData->m_frameStats.percent8x8Intra = (double)totalI / totalCuCount;
         m_frame->m_encData->m_frameStats.percent8x8Inter = (double)totalP / totalCuCount;
         m_frame->m_encData->m_frameStats.percent8x8Skip  = (double)totalSkip / totalCuCount;
@@ -978,6 +1026,7 @@ void FrameEncoder::compressFrame()
     m_entropyCoder.setBitstream(&m_bs);
 
     // finish encode of each CTU row, only required when SAO is enabled
+    // 12、SAO，并调用encodeSlice()
     if (m_param->bEnableSAO)
         encodeSlice(0);
 
@@ -1117,10 +1166,11 @@ void FrameEncoder::compressFrame()
         for (int ref = 0; ref < slice->m_numRefIdx[l]; ref++)
         {
             Frame *refpic = slice->m_refFrameList[l][ref];
-            ATOMIC_DEC(&refpic->m_countRefEncoders);
+            ATOMIC_DEC(&refpic->m_countRefEncoders); //被参考计数减一
         }
     }
 
+    //13、去噪处理NR updates（Noise Reduction）,更新去噪偏移值
     if (m_nr)
     {
         bool nrEnabled = (m_rce.newQp < QP_MAX_SPEC || !m_param->rc.vbvBufferSize) && (m_param->noiseReductionIntra || m_param->noiseReductionInter);
@@ -1128,24 +1178,31 @@ void FrameEncoder::compressFrame()
         if (nrEnabled)
         {
             /* Accumulate NR statistics from all worker threads */
-            for (int i = 0; i < numTLD; i++)
+            //加速所有线程的NR统计
+            for (int i = 0; i < numTLD; i++) //遍历当前帧编码应用所有线程：累加当前帧各个系数的统计数字
             {
+                //获取当前线程对应当前帧的去噪类；i 确定当前帧的所有线程，如每个WPP行  m_jpId 确定当前帧
                 NoiseReduction* nr = &m_tld[i].analysis.m_quant.m_frameNr[m_jpId];
-                for (int cat = 0; cat < MAX_NUM_TR_CATEGORIES; cat++)
+                for (int cat = 0; cat < MAX_NUM_TR_CATEGORIES; cat++) //遍历所有TU类别
                 {
                     for (int coeff = 0; coeff < MAX_NUM_TR_COEFFS; coeff++)
-                        m_nr->nrResidualSum[cat][coeff] += nr->nrResidualSum[cat][coeff];
+                        m_nr->nrResidualSum[cat][coeff] += nr->nrResidualSum[cat][coeff]; //累加当前帧所有TU对应位置的系数绝对值和
 
-                    m_nr->nrCount[cat] += nr->nrCount[cat];
+                    m_nr->nrCount[cat] += nr->nrCount[cat]; 	//累加当前帧的TU计数
                 }
             }
 
+            // DCT-domain noise reduction / adaptive deadzone from libavcodec
             noiseReductionUpdate();
 
+            //拷贝NR系数至所有的工作线程
             /* Copy updated NR coefficients back to all worker threads */
-            for (int i = 0; i < numTLD; i++)
+            for (int i = 0; i < numTLD; i++) //遍历当前帧编码应用所有线程
             {
+                //获取当前线程对应当前帧的去噪类；i 确定当前帧的所有线程，如每个WPP行  m_jpId 确定当前帧
                 NoiseReduction* nr = &m_tld[i].analysis.m_quant.m_frameNr[m_jpId];
+
+                //将当前更新的去噪偏移值拷贝到各个线程中的去噪偏移中去
                 memcpy(nr->nrOffsetDenoise, m_nr->nrOffsetDenoise, sizeof(uint16_t)* MAX_NUM_TR_CATEGORIES * MAX_NUM_TR_COEFFS);
                 memset(nr->nrCount, 0, sizeof(uint32_t)* MAX_NUM_TR_CATEGORIES);
                 memset(nr->nrResidualSum, 0, sizeof(uint32_t)* MAX_NUM_TR_CATEGORIES * MAX_NUM_TR_COEFFS);
@@ -1153,6 +1210,7 @@ void FrameEncoder::compressFrame()
         }
     }
 
+    //统计数据
 #if DETAILED_CU_STATS
     /* Accumulate CU statistics from each worker thread, we could report
      * per-frame stats here, but currently we do not. */
@@ -1160,7 +1218,7 @@ void FrameEncoder::compressFrame()
         m_cuStats.accumulate(m_tld[i].analysis.m_stats[m_jpId], *m_param);
 #endif
 
-    m_endFrameTime = x265_mdate();
+    m_endFrameTime = x265_mdate(); //帧编码的结束时间(timestamp after RCEnd, NR updates, etc)
 }
 
 void FrameEncoder::encodeSlice(uint32_t sliceAddr)
@@ -1171,6 +1229,8 @@ void FrameEncoder::encodeSlice(uint32_t sliceAddr)
     const uint32_t numSubstreams = m_param->bEnableWavefront ? slice->m_sps->numCuInHeight : 1;
 
     SAOParam* saoParam = slice->m_sps->bUseSAO ? m_frame->m_encData->m_saoParam : NULL;
+
+    //遍历当前Slice中的CU
     for (uint32_t cuAddr = sliceAddr; cuAddr < lastCUAddr; cuAddr++)
     {
         uint32_t col = cuAddr % widthInLCUs;

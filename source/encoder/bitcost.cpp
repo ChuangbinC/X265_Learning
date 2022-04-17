@@ -41,6 +41,8 @@ void BitCost::setQP(unsigned int qp)
             x265_emms(); // just to be safe
 
             CalculateLogs();
+            // 乘以4的目的：按H265视频编码标准中的亮度分量运动估计1/4像素申请内存
+            // + 2 * BC_MAX_MV 是为了实现数组偏移，为下面的负数索引做准备
             s_costs[qp] = X265_MALLOC(uint16_t, 4 * BC_MAX_MV + 1) + 2 * BC_MAX_MV;
             if (!s_costs[qp])
             {
@@ -50,6 +52,7 @@ void BitCost::setQP(unsigned int qp)
             double lambda = x265_lambda_tab[qp];
 
             // estimate same cost for negative and positive MVD
+            // 考虑到mvd可能有正值和负值，所以这里遍历时需要乘以2
             for (int i = 0; i <= 2 * BC_MAX_MV; i++)
                 s_costs[qp][i] = s_costs[qp][-i] = (uint16_t)X265_MIN(s_bitsizes[i] * lambda + 0.5f, (1 << 15) - 1);
         }

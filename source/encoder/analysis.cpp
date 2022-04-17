@@ -265,11 +265,13 @@ Mode& Analysis::compressCTU(CUData& ctu, Frame& frame, const CUGeom& cuGeom, con
         if (m_param->bIntraRefresh && m_slice->m_sliceType == P_SLICE &&
             ctu.m_cuPelX / m_param->maxCUSize >= frame.m_encData->m_pir.pirStartCol
             && ctu.m_cuPelX / m_param->maxCUSize < frame.m_encData->m_pir.pirEndCol)
+            // P帧中的intra块预测
             compressIntraCU(ctu, cuGeom, qp);
         else if (!m_param->rdLevel)
         {
             /* In RD Level 0/1, copy source pixels into the reconstructed block so
              * they are available for intra predictions */
+            // 在RD Level 0/1中，将源像素复制到重建块中，以便它们可用于内部预测。
             m_modeDepth[0].fencYuv.copyToPicYuv(*m_frame->m_reconPic, ctu.m_cuAddr, 0);
 
             compressInterCU_rd0_4(ctu, cuGeom, qp);
@@ -511,11 +513,15 @@ void Analysis::qprdRefine(const CUData& parentCTU, const CUGeom& cuGeom, int32_t
 
 uint64_t Analysis::compressIntraCU(const CUData& parentCTU, const CUGeom& cuGeom, int32_t qp)
 {
-    uint32_t depth = cuGeom.depth;
-    ModeDepth& md = m_modeDepth[depth];
-    md.bestMode = NULL;
+    uint32_t depth = cuGeom.depth; // 当前parent CU所在深度
+    ModeDepth& md = m_modeDepth[depth]; // 存储该深度下的预测数据、原始YUV和best mode
+    md.bestMode = NULL; // 最佳模式, 后续checkBestMode会进行检查
 
+    // 当前CU不是CTU的叶子节点，设置mightSplit为True，继续分裂
+    // 后续根据mightSplit判断是否将split flag添加到RD cost中
     bool mightSplit = !(cuGeom.flags & CUGeom::LEAF);
+    // CUGeom::SPLIT_MANDATORY=True表示如果当前CU是帧内编码而且可以分裂，则强制分裂
+    // mightNotSplit设置为True，表示不强制分裂
     bool mightNotSplit = !(cuGeom.flags & CUGeom::SPLIT_MANDATORY);
 
     bool bAlreadyDecided = parentCTU.m_lumaIntraDir[cuGeom.absPartIdx] != (uint8_t)ALL_IDX;
@@ -537,6 +543,7 @@ uint64_t Analysis::compressIntraCU(const CUData& parentCTU, const CUGeom& cuGeom
             mode.cu.initSubCU(parentCTU, cuGeom, qp);
             bool reuseModes = !((m_param->intraRefine == 3) ||
                                 (m_param->intraRefine == 2 && parentCTU.m_lumaIntraDir[cuGeom.absPartIdx] > DC_IDX));
+            // TOASK: 复用父块的IntraMode？
             if (reuseModes)
             {
                 memcpy(mode.cu.m_lumaIntraDir, parentCTU.m_lumaIntraDir + cuGeom.absPartIdx, cuGeom.numPartitions);
@@ -2539,7 +2546,7 @@ void Analysis::recodeCU(const CUData& parentCTU, const CUGeom& cuGeom, int32_t q
     }
     if (!bDecidedDepth || split)
     {
-        Mode* splitPred = &md.pred[PRED_SPLIT];
+        Mode* splitPred = &md.pred[PRED_SPLIT]; // 保存当前CU划分后的mode，由四个子CU的返回结果拼接而成
         if (!split)
             md.bestMode = splitPred;
         splitPred->initCosts();
@@ -2547,9 +2554,9 @@ void Analysis::recodeCU(const CUData& parentCTU, const CUGeom& cuGeom, int32_t q
         splitCU->initSubCU(parentCTU, cuGeom, qp);
 
         uint32_t nextDepth = depth + 1;
-        ModeDepth& nd = m_modeDepth[nextDepth];
+        ModeDepth& nd = m_modeDepth[nextDepth]; // nd是md的下一层深度
         invalidateContexts(nextDepth);
-        Entropy* nextContext = &m_rqt[depth].cur;
+        Entropy* nextContext = &m_rqt[depth].cur; 
         int nextQP = qp;
 
         for (uint32_t subPartIdx = 0; subPartIdx < 4; subPartIdx++)
@@ -2614,6 +2621,10 @@ void Analysis::checkMerge2Nx2N_rd0_4(Mode& skip, Mode& merge, const CUGeom& cuGe
 
     /* Note that these two Mode instances are named MERGE and SKIP but they may
      * hold the reverse when the function returns. We toggle between the two modes */
+
+    /* 注意，这两个模式实例被命名为MERGE和SKIP，但当函数返回时，它们可能持有相反的内容。
+     * 我们在这两种模式之间进行切换 */
+
     Mode* tempPred = &merge;
     Mode* bestPred = &skip;
 
@@ -2687,6 +2698,8 @@ void Analysis::checkMerge2Nx2N_rd0_4(Mode& skip, Mode& merge, const CUGeom& cuGe
             tempPred->distortion += primitives.chroma[m_csp].cu[sizeIdx].sa8d(fencYuv->m_buf[1], fencYuv->m_csize, tempPred->predYuv.m_buf[1], tempPred->predYuv.m_csize);
             tempPred->distortion += primitives.chroma[m_csp].cu[sizeIdx].sa8d(fencYuv->m_buf[2], fencYuv->m_csize, tempPred->predYuv.m_buf[2], tempPred->predYuv.m_csize);
         }
+
+        // 运动搜索的RDO过程，并没有完整的RDO，利用的是SATD+bitcost
         tempPred->sa8dCost = m_rdCost.calcRdSADCost((uint32_t)tempPred->distortion, tempPred->sa8dBits);
 
         if (tempPred->sa8dCost < bestPred->sa8dCost)
@@ -2701,6 +2714,7 @@ void Analysis::checkMerge2Nx2N_rd0_4(Mode& skip, Mode& merge, const CUGeom& cuGe
         return;
 
     /* calculate the motion compensation for chroma for the best mode selected */
+    /* 为所选的最佳模式计算色度的运动补偿 */
     if ((!m_bChromaSa8d && (m_csp != X265_CSP_I400)) || (m_frame->m_fencPic->m_picCsp == X265_CSP_I400 && m_csp != X265_CSP_I400)) /* Chroma MC was done above */
         motionCompensation(bestPred->cu, pu, bestPred->predYuv, false, true);
 
@@ -2709,6 +2723,7 @@ void Analysis::checkMerge2Nx2N_rd0_4(Mode& skip, Mode& merge, const CUGeom& cuGe
         if (m_param->bLossless)
             bestPred->rdCost = MAX_INT64;
         else
+            // 编码skip模式
             encodeResAndCalcRdSkipCU(*bestPred);
 
         /* Encode with residual */
@@ -2718,10 +2733,12 @@ void Analysis::checkMerge2Nx2N_rd0_4(Mode& skip, Mode& merge, const CUGeom& cuGe
         tempPred->cu.setPUMv(1, candMvField[bestSadCand][1].mv, 0, 0);
         tempPred->cu.setPURefIdx(0, (int8_t)candMvField[bestSadCand][0].refIdx, 0, 0);
         tempPred->cu.setPURefIdx(1, (int8_t)candMvField[bestSadCand][1].refIdx, 0, 0);
+        // 上面的encodeResAndCalcRdSkipCU函数没有覆盖sa8dCost变量
         tempPred->sa8dCost = bestPred->sa8dCost;
         tempPred->sa8dBits = bestPred->sa8dBits;
         tempPred->predYuv.copyFromYuv(bestPred->predYuv);
 
+        // 编码Inter模式
         encodeResAndCalcRdInterCU(*tempPred, cuGeom);
 
         md.bestMode = tempPred->rdCost < bestPred->rdCost ? tempPred : bestPred;

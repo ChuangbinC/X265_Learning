@@ -1233,6 +1233,8 @@ void Search::checkIntra(Mode& intraMode, const CUGeom& cuGeom, PartSize partSize
         m_entropyCoder.codeCUTransquantBypassFlag(cu.m_tqBypass[0]);
 
     int skipFlagBits = 0;
+
+    // 在P帧还需要将intra块的信息（是否为skip块）编入熵编码，用于更新上下文
     if (!m_slice->isIntra())
     {
         m_entropyCoder.codeSkipFlag(cu, 0);
@@ -1544,6 +1546,7 @@ sse_t Search::estIntraPredQT(Mode &intraMode, const CUGeom& cuGeom, const uint32
                 uint64_t modeCosts[35];
 
                 // DC
+                // X265采用函数指针来定义不同角度的计算，通过结构体cu里的intra_pred_t来定义。例如，intra_pred_dc_c<4>等
                 primitives.cu[sizeIdx].intra_pred[DC_IDX](m_intraPred, scaleStride, intraNeighbourBuf[0], 0, (scaleTuSize <= 16));
                 uint32_t bits = (mpms & ((uint64_t)1 << DC_IDX)) ? m_entropyCoder.bitsIntraModeMPM(mpmModes, DC_IDX) : rbits;
                 uint32_t sad = sa8d(fenc, scaleStride, m_intraPred, scaleStride) << costShift;
@@ -1551,6 +1554,7 @@ sse_t Search::estIntraPredQT(Mode &intraMode, const CUGeom& cuGeom, const uint32
 
                 // PLANAR
                 pixel* planar = intraNeighbourBuf[0];
+                // TOASK: tu大小决定planar模式的参考像素？
                 if (tuSize >= 8 && tuSize <= 32)
                     planar = intraNeighbourBuf[1];
 
@@ -1561,6 +1565,7 @@ sse_t Search::estIntraPredQT(Mode &intraMode, const CUGeom& cuGeom, const uint32
                 COPY1_IF_LT(bcost, modeCosts[PLANAR_IDX]);
 
                 // angular predictions
+                // TOASK: 下面代码跟else的区别是啥？
                 if (primitives.cu[sizeIdx].intra_pred_allangs)
                 {
                     primitives.cu[sizeIdx].transpose(m_fencTransposed, fenc, scaleStride);
@@ -1596,7 +1601,7 @@ sse_t Search::estIntraPredQT(Mode &intraMode, const CUGeom& cuGeom, const uint32
                 for (int i = 0; i < maxCandCount; i++)
                     candCostList[i] = MAX_INT64;
 
-                uint64_t paddedBcost = bcost + (bcost >> 2); // 1.25%
+                uint64_t paddedBcost = bcost + (bcost >> 2); // 计算粗搜索最优模式的cost的1.25倍cost，用于精搜索的筛选。
                 for (int mode = 0; mode < 35; mode++)
                     if ((modeCosts[mode] < paddedBcost) || ((uint32_t)mode == mpmModes[0])) 
                         /* choose for R-D analysis only if this mode passes cost threshold or matches MPM[0] */
@@ -2630,6 +2635,7 @@ void Search::setSearchRange(const CUData& cu, const MV& mvp, int merange, MV& mv
 }
 
 /* Note: this function overwrites the RD cost variables of interMode, but leaves the sa8d cost unharmed */
+/* 这个函数覆盖了interMode的RD cost变量，但保留了sa8d cost，没有受到影响。*/
 void Search::encodeResAndCalcRdSkipCU(Mode& interMode)
 {
     CUData& cu = interMode.cu;
@@ -3787,12 +3793,14 @@ void Search::saveResidualQTData(CUData& cu, ShortYuv& resiYuv, uint32_t absPartI
 
 /* returns the number of bits required to signal a non-most-probable mode.
  * on return mpms contains bitmap of most probable modes */
+/* 返回no-mpm所需的比特数，返回时mpms包含最可能模式的位图。*/
 uint32_t Search::getIntraRemModeBits(CUData& cu, uint32_t absPartIdx, uint32_t mpmModes[3], uint64_t& mpms) const
 {
     cu.getIntraDirLumaPredictor(absPartIdx, mpmModes);
 
     mpms = 0;
     for (int i = 0; i < 3; ++i)
+        // 需要表示 34 个角度的mpm的bitmap，所以是uin64类型
         mpms |= ((uint64_t)1 << mpmModes[i]);
 
     return m_entropyCoder.bitsIntraModeNonMPM();

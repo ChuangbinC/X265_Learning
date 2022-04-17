@@ -763,35 +763,36 @@ void Entropy::encodeCU(const CUData& ctu, const CUGeom& cuGeom, uint32_t absPart
 {
     const Slice* slice = ctu.m_slice;
 
-    int cuSplitFlag = !(cuGeom.flags & CUGeom::LEAF);
-    int cuUnsplitFlag = !(cuGeom.flags & CUGeom::SPLIT_MANDATORY);
+    int cuSplitFlag = !(cuGeom.flags & CUGeom::LEAF); //CU分割标志
+    int cuUnsplitFlag = !(cuGeom.flags & CUGeom::SPLIT_MANDATORY); //CU不分割标志
 
+    // CU继续分割时
     if (!cuUnsplitFlag)
     {
         uint32_t qNumParts = cuGeom.numPartitions >> 2;
-        if (depth == slice->m_pps->maxCuDQPDepth && slice->m_pps->bUseDQP)
+        if (depth == slice->m_pps->maxCuDQPDepth && slice->m_pps->bUseDQP) 
             bEncodeDQP = true;
         for (uint32_t qIdx = 0; qIdx < 4; ++qIdx, absPartIdx += qNumParts)
         {
             const CUGeom& childGeom = *(&cuGeom + cuGeom.childOffset + qIdx);
             if (childGeom.flags & CUGeom::PRESENT)
-                encodeCU(ctu, childGeom, absPartIdx, depth + 1, bEncodeDQP);
+                encodeCU(ctu, childGeom, absPartIdx, depth + 1, bEncodeDQP); // 递归划分CU
         }
         return;
     }
 
     if (cuSplitFlag) 
-        codeSplitFlag(ctu, absPartIdx, depth);
+        codeSplitFlag(ctu, absPartIdx, depth); // 编码分割标志
 
-    if (depth < ctu.m_cuDepth[absPartIdx] && depth < ctu.m_encData->m_param->maxCUDepth)
+    if (depth < ctu.m_cuDepth[absPartIdx] && depth < ctu.m_encData->m_param->maxCUDepth) //分割后的深度若符合要求，则递归调用
     {
         uint32_t qNumParts = cuGeom.numPartitions >> 2;
-        if (depth == slice->m_pps->maxCuDQPDepth && slice->m_pps->bUseDQP)
+        if (depth == slice->m_pps->maxCuDQPDepth && slice->m_pps->bUseDQP) //获取深度，由于继续分割，此处的深度应该比之前的深度+1
             bEncodeDQP = true;
-        for (uint32_t qIdx = 0; qIdx < 4; ++qIdx, absPartIdx += qNumParts)
+        for (uint32_t qIdx = 0; qIdx < 4; ++qIdx, absPartIdx += qNumParts) //分割成的4个更小CU，即分割后的4个CU
         {
             const CUGeom& childGeom = *(&cuGeom + cuGeom.childOffset + qIdx);
-            encodeCU(ctu, childGeom, absPartIdx, depth + 1, bEncodeDQP);
+            encodeCU(ctu, childGeom, absPartIdx, depth + 1, bEncodeDQP); //递归调用
         }
         return;
     }
@@ -800,24 +801,25 @@ void Entropy::encodeCU(const CUData& ctu, const CUGeom& cuGeom, uint32_t absPart
         bEncodeDQP = true;
 
     if (slice->m_pps->bTransquantBypassEnabled)
-        codeCUTransquantBypassFlag(ctu.m_tqBypass[absPartIdx]);
+        codeCUTransquantBypassFlag(ctu.m_tqBypass[absPartIdx]); // 编码忽略的CU变换、量化的标志
 
-    if (!slice->isIntra())
+
+    if (!slice->isIntra()) //若不为帧内，即不是I帧
     {
-        codeSkipFlag(ctu, absPartIdx);
-        if (ctu.isSkipped(absPartIdx))
+        codeSkipFlag(ctu, absPartIdx); // 编码Skip标志
+        if (ctu.isSkipped(absPartIdx)) //若为Skip模式
         {
-            codeMergeIndex(ctu, absPartIdx);
-            finishCU(ctu, absPartIdx, depth, bEncodeDQP);
+            codeMergeIndex(ctu, absPartIdx); // 编码Merge索引
+            finishCU(ctu, absPartIdx, depth, bEncodeDQP); // 调用finishCU()，完成Bit的最终写入
             return;
         }
-        codePredMode(ctu.m_predMode[absPartIdx]);
+        codePredMode(ctu.m_predMode[absPartIdx]); // 编码预测模式
     }
 
-    codePartSize(ctu, absPartIdx, depth);
+    codePartSize(ctu, absPartIdx, depth); // 编码分割大小
 
     // prediction Info ( Intra : direction mode, Inter : Mv, reference idx )
-    codePredInfo(ctu, absPartIdx);
+    codePredInfo(ctu, absPartIdx); // 编码预测信息
 
     uint32_t tuDepthRange[2];
     if (ctu.isIntra(absPartIdx))
@@ -826,10 +828,10 @@ void Entropy::encodeCU(const CUData& ctu, const CUGeom& cuGeom, uint32_t absPart
         ctu.getInterTUQtDepthRange(tuDepthRange, absPartIdx);
 
     // Encode Coefficients, allow codeCoeff() to modify bEncodeDQP
-    codeCoeff(ctu, absPartIdx, bEncodeDQP, tuDepthRange);
+    codeCoeff(ctu, absPartIdx, bEncodeDQP, tuDepthRange); // 编码系数
 
     // --- write terminating bit ---
-    finishCU(ctu, absPartIdx, depth, bEncodeDQP);
+    finishCU(ctu, absPartIdx, depth, bEncodeDQP); // 调用finishCU()，完成Bit的最终
 }
 
 /* Return bit count of signaling inter mode */
@@ -884,8 +886,8 @@ uint32_t Entropy::bitsInterMode(const CUData& cu, uint32_t absPartIdx, uint32_t 
 void Entropy::finishCU(const CUData& ctu, uint32_t absPartIdx, uint32_t depth, bool bCodeDQP)
 {
     const Slice* slice = ctu.m_slice;
-    uint32_t realEndAddress = slice->m_endCUAddr;
-    uint32_t cuAddr = ctu.getSCUAddr() + absPartIdx;
+    uint32_t realEndAddress = slice->m_endCUAddr; //真正的结束地址
+    uint32_t cuAddr = ctu.getSCUAddr() + absPartIdx; //CU的地址
     X265_CHECK(realEndAddress == slice->realEndAddress(slice->m_endCUAddr), "real end address expected\n");
 
     uint32_t granularityMask = ctu.m_encData->m_param->maxCUSize - 1;
@@ -902,7 +904,7 @@ void Entropy::finishCU(const CUData& ctu, uint32_t absPartIdx, uint32_t depth, b
     {
         // Encode slice finish
         uint32_t bTerminateSlice = ctu.m_bLastCuInSlice;
-        if (cuAddr + (slice->m_param->num4x4Partitions >> (depth << 1)) == realEndAddress)
+        if (cuAddr + (slice->m_param->num4x4Partitions >> (depth << 1)) == realEndAddress) //若条件成立，则Slice结束
             bTerminateSlice = 1;
 
         // The 1-terminating bit is added to all streams, so don't add it here when it's 1.
@@ -1121,7 +1123,9 @@ void Entropy::encodeTransformLuma(const CUData& cu, uint32_t absPartIdx, uint32_
     }
 }
 
-
+/**
+* 熵编码预测模式相关的信息，Intra包含角度。Inter包含mv和ref index
+**/
 void Entropy::codePredInfo(const CUData& cu, uint32_t absPartIdx)
 {
     if (cu.isIntra(absPartIdx)) // If it is intra mode, encode intra prediction mode.

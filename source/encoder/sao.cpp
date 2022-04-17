@@ -576,9 +576,12 @@ void SAO::generateLumaOffsets(SaoCtuParam* ctuParam, int idxY, int idxX)
     int ctuWidth = m_param->maxCUSize;
     int ctuHeight = m_param->maxCUSize;
 
+    // 获取CTU地址，并获得CTU的重构图像像素
     int addr = idxY * m_numCuInWidth + idxX;
     pixel* rec = reconPic->getLumaAddr(addr);
 
+    // 如果是水平方向第一个CTU，则用m_tmpL1[0]保存CTIU左边一列
+    // （即左边CTU最右边的一列，不属于该CTU）的重建值
     if (idxX == 0)
     {
         for (int i = 0; i < ctuHeight + 1; i++)
@@ -588,9 +591,12 @@ void SAO::generateLumaOffsets(SaoCtuParam* ctuParam, int idxY, int idxX)
         }
     }
 
+    // 判断当前CTU是否与左边CTU的SAO模式一样
     bool mergeLeftFlag = (ctuParam[addr].mergeMode == SAO_MERGE_LEFT);
     int typeIdx = ctuParam[addr].typeIdx;
 
+    // 当前CTU不是水平方向的最后一个CTU，则用m_tmpL2[0]来保存当前CTU最右边的一列
+    // (属于该CTU)重构值，后续将m_tmpL1[0]交换可以用于下一个CTU的SAO模式计算
     if (idxX != (m_numCuInWidth - 1))
     {
         rec = reconPic->getLumaAddr(addr);
@@ -601,9 +607,10 @@ void SAO::generateLumaOffsets(SaoCtuParam* ctuParam, int idxY, int idxX)
         }
     }
 
+    // SAO补偿模式共5种，取值为 0 - 4
     if (typeIdx >= 0)
     {
-        if (!mergeLeftFlag)
+        if (!mergeLeftFlag)// 如果跟左边的CTU相同的SAO模式，则直接采用左边CTU的值
         {
             if (typeIdx == SAO_BO)
             {
@@ -623,6 +630,7 @@ void SAO::generateLumaOffsets(SaoCtuParam* ctuParam, int idxY, int idxX)
                     m_offsetEo[0][edgeType] = (int8_t)offset[s_eoTable[edgeType]];
             }
         }
+        // m_offsetEo[0]保存了亮度平面各个边界或边带需要补偿的值，将该值用于SAO补偿中
         applyPixelOffsets(addr, typeIdx, 0);
     }
     std::swap(m_tmpL1[0], m_tmpL2[0]);
@@ -741,6 +749,7 @@ void SAO::calcSaoStatsCTU(int addr, int plane)
     const pixel* rec0  = reconPic->getPlaneAddr(plane, addr);
     const pixel* fenc;
     const pixel* rec;
+    // plane为0表示亮度，非0表示色度
     intptr_t stride = plane ? reconPic->m_strideC : reconPic->m_stride;
     uint32_t picWidth  = m_param->sourceWidth;
     uint32_t picHeight = m_param->sourceHeight;
@@ -1229,14 +1238,18 @@ void SAO::rdoSaoUnitCu(SAOParam* saoParam, int rowBaseAddr, int idxX, int addr)
     int qp = cu->m_qp[0];
     int64_t lambda[2] = { 0 };
 
+    // 色度量化因子
     int qpCb = qp + slice->m_pps->chromaQpOffset[0] + slice->m_chromaQpOffset[0];
     if (m_param->internalCsp == X265_CSP_I420)
         qpCb = x265_clip3(m_param->rc.qpMin, m_param->rc.qpMax, (int)g_chromaScale[x265_clip3(QP_MIN, QP_MAX_MAX, qpCb)]);
     else
         qpCb = x265_clip3(m_param->rc.qpMin, m_param->rc.qpMax, qpCb);
+
+    // lambda[0]用于调节亮度SAO参数计算，lambda[1]用于调整色度SAO参数计算
     lambda[0] = (int64_t)floor(256.0 * x265_lambda2_tab[qp]);
     lambda[1] = (int64_t)floor(256.0 * x265_lambda2_tab[qpCb]); // Use Cb QP for SAO chroma
 
+    // 分别判断当前CTU是否是最左边一列和最上边的一行的CTU，即是否存在left块和above块。
     const bool allowMerge[2] = {(idxX != 0), (rowBaseAddr != 0)}; // left, up
 
     const int addrMerge[2] = {(idxX ? addr - 1 : -1), (rowBaseAddr ? addr - m_numCuInWidth : -1)};// left, up
@@ -1290,8 +1303,11 @@ void SAO::rdoSaoUnitCu(SAOParam* saoParam, int rowBaseAddr, int idxX, int addr)
     {
         if (!m_param->bLimitSAO || !bSaoOff)
         {
+            // 统计当前CTU在BO和EO各模式下的像素归类，包括重构像素与原始像素差值之和，以及对classIdx的计数
             calcSaoStatsCTU(addr, 0);
+            // 利用先前已经得到的统计信息（即m_count和m_offsetOrg）计算初始补偿值(即m_offset)
             saoStatsInitialOffset(addr, 0);
+            // RDO 计算
             saoLumaComponentParamDist(saoParam, addr, rateDist, lambda, bestCost);
         }
     }
@@ -1312,6 +1328,7 @@ void SAO::rdoSaoUnitCu(SAOParam* saoParam, int rowBaseAddr, int idxX, int addr)
         // Cost of merge left or Up
         for (int mergeIdx = 0; mergeIdx < 2; ++mergeIdx)
         {
+            // 左边或上边CTU不存在则跳过
             if (!allowMerge[mergeIdx])
                 continue;
 
@@ -1323,7 +1340,10 @@ void SAO::rdoSaoUnitCu(SAOParam* saoParam, int rowBaseAddr, int idxX, int addr)
                 int typeIdx = mergeSrcParam->typeIdx;
                 if (typeIdx >= 0)
                 {
+                    // 如果是边带模式，获取第一个条带的编号，否则取值1
                     int bandPos = (typeIdx == SAO_BO) ? mergeSrcParam->bandPos : 1;
+
+                    // 根据4种类型的补偿值来计算失真差值
                     for (int classIdx = 0; classIdx < SAO_NUM_OFFSET; classIdx++)
                     {
                         int mergeOffset = mergeSrcParam->offset[classIdx];
@@ -1342,7 +1362,7 @@ void SAO::rdoSaoUnitCu(SAOParam* saoParam, int rowBaseAddr, int idxX, int addr)
 
             uint32_t estRate = m_entropyCoder.getNumberOfWrittenBits();
             int64_t mergeCost = mergeDist + estRate;
-            if (mergeCost < bestCost)
+            if (mergeCost < bestCost) // 如果merge的cost比SAO的各种模式还要小，则采用merge模式
             {
                 SaoMergeMode mergeMode = mergeIdx ? SAO_MERGE_UP : SAO_MERGE_LEFT;
                 bestCost = mergeCost;

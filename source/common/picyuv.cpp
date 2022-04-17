@@ -205,7 +205,9 @@ void PicYuv::destroy()
 }
 
 /* Copy pixels from an x265_picture into internal PicYuv instance.
- * Shift pixels as necessary, mask off bits above X265_DEPTH for safety. */
+ * Shift pixels as necessary, mask off bits above X265_DEPTH for safety.
+ * 从x265_picture复制像素到内部的PicYuv实例。根据需要移动像素，为了安全起见，屏蔽掉X265_DEPTH以上的位。
+ */
 void PicYuv::copyFromPicture(const x265_picture& pic, const x265_param& param, int padx, int pady)
 {
     /* m_picWidth is the width that is being encoded, padx indicates how many
@@ -215,7 +217,10 @@ void PicYuv::copyFromPicture(const x265_picture& pic, const x265_param& param, i
      * downscale and other operations. But those padding pixels are never
      * encoded.
      *
-     * The same applies to m_picHeight and pady */
+     * The same applies to m_picHeight and pady
+     *
+     * 边界对齐以及填充像素
+     */
 
     /* width and height - without padsize (input picture raw width and height) */
     int width = m_picWidth - padx;

@@ -110,6 +110,9 @@ inline char *strcatFilename(const char *input, const char *suffix)
     return output;
 }
 
+/**
+*  encoder_create()函数的主要功能是检测线程池、可用的线程数目等等，若线程使用的条件符合则调用threadMain()函数
+**/
 void Encoder::create()
 {
     if (!primitives.pu[0].sad)
@@ -125,6 +128,7 @@ void Encoder::create()
     int cols = (p->sourceWidth  + p->maxCUSize - 1) >> g_log2Size[p->maxCUSize];
 
     // Do not allow WPP if only one row or fewer than 3 columns, it is pointless and unstable
+    // 对于不符合条件的，不进行WPP
     if (rows == 1 || cols < 3)
     {
         x265_log(p, X265_LOG_WARNING, "Too few rows/columns, --wpp disabled\n");
@@ -134,6 +138,7 @@ void Encoder::create()
     bool allowPools = !p->numaPools || strcmp(p->numaPools, "none");
 
     // Trim the thread pool if --wpp, --pme, and --pmode are disabled
+    // 如果--wpp, --pme, and --pmode不使能,清理线程池
     if (!p->bEnableWavefront && !p->bDistributeModeAnalysis && !p->bDistributeMotionEstimation && !p->lookaheadSlices)
         allowPools = false;
 
@@ -142,6 +147,7 @@ void Encoder::create()
         m_threadPool = ThreadPool::allocThreadPools(p, m_numPools, 0);
     else
     {
+        // 根据核数检测线程的数目
         if (!p->frameNumThreads)
         {
             // auto-detect frame threads
@@ -910,7 +916,7 @@ int Encoder::encode(const x265_picture* pic_in, x265_picture* pic_out)
         }
 
         Frame *inFrame;
-        if (m_dpb->m_freeList.empty())
+        if (m_dpb->m_freeList.empty()) //若List为空，则创建
         {
             inFrame = new Frame;
             inFrame->m_encodeStartTime = x265_mdate();
@@ -963,7 +969,7 @@ int Encoder::encode(const x265_picture* pic_in, x265_picture* pic_out)
                 return -1;
             }
         }
-        else
+        else //若List不为空，则popBack
         {
             inFrame = m_dpb->m_freeList.popBack();
             inFrame->m_encodeStartTime = x265_mdate();
@@ -1466,6 +1472,7 @@ int Encoder::encode(const x265_picture* pic_in, x265_picture* pic_out)
                 allocAnalysis(analysis);
             }
             /* determine references, setup RPS, etc */
+            /* 准备编码前的一些工作，如决定参考帧,设置RPS等等 */
             m_dpb->prepareEncode(frameEnc);
 
             if (m_param->rc.rateControlMode != X265_RC_CQP)
@@ -1474,6 +1481,7 @@ int Encoder::encode(const x265_picture* pic_in, x265_picture* pic_out)
                  calcRefreshInterval(frameEnc);
 
             /* Allow FrameEncoder::compressFrame() to start in the frame encoder thread */
+            /* 编码线程的开始，调用了startCompressFrame()函数，而startCompressFrame()调用了m_enable.trigger()以触发线程 */
             if (!curEncoder->startCompressFrame(frameEnc))
                 m_aborted = true;
         }

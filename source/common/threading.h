@@ -131,6 +131,7 @@ protected:
     CRITICAL_SECTION handle;
 };
 
+
 class Event
 {
 public:

@@ -580,11 +580,12 @@ int main(int argc, char **argv)
     api->encoder_parameters(encoder, param);
 
      /* Control-C handler */
+    //当键入Ctrl-C的时候，当前执行程序调用指针函数sigint_handler 执行完后，再返回原来执行的地方接着往下走。
     if (signal(SIGINT, sigint_handler) == SIG_ERR)
         x265_log(param, X265_LOG_ERROR, "Unable to register CTRL+C handler: %s\n", strerror(errno));
 
-    x265_picture pic_orig, pic_out;
-    x265_picture *pic_in = &pic_orig;
+    x265_picture pic_orig, pic_out;   //定义x265的输入pic_orig和输出pic_out
+    x265_picture *pic_in = &pic_orig; //获取x265的输入pic_orig的地址
     /* Allocate recon picture if analysis save/load is enabled */
     std::priority_queue<int64_t>* pts_queue = cliopt.output->needPTS() ? new std::priority_queue<int64_t>() : NULL;
     x265_picture *pic_recon = (cliopt.recon || param->analysisSave || param->analysisLoad || pts_queue || reconPlay || param->csvLogLevel) ? &pic_out : NULL;
@@ -681,6 +682,7 @@ int main(int argc, char **argv)
     }
 
     /* Flush the encoder */
+    /*功能：前面读入24帧后才开始编码，此处其实就是处理对应的倒数的24帧，将其存储*/
     while (!b_ctrl_c)
     {
         int numEncoded = api->encoder_encode(encoder, &p_nal, &nal, NULL, pic_recon);
